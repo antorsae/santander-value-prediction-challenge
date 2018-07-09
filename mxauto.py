@@ -308,10 +308,8 @@ xgb_fit_params = {
     'verbose': False,
 }
 
-Y_orig = Y.copy()
-
-folds = 5
-bootstrap_runs = 3
+folds = 10
+bootstrap_runs = 5
 
 fold_scores = []
 fold_predictions = []
@@ -358,8 +356,8 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(KFold(n_splits=folds, random_st
 		regressor_scores = []
 		regressor_predictions = []
 		#for regressor, fit_params in [(xgb_regressor, xgb_fit_params), (cb_clf, {})]:
-		#for regressor, fit_params in [(cb_clf, {})]:
 		for regressor, fit_params in [(xgb_regressor, xgb_fit_params)]:#, (cb_clf, {})]:
+#		for regressor, fit_params in [(cb_clf, {})]:
 			regressor.fit(X_train, Y_train, eval_set=[(X_test, Y_test)], **fit_params)
 			if isinstance(regressor, xgb.XGBRegressor):
 				score = regressor.best_score
@@ -372,10 +370,10 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(KFold(n_splits=folds, random_st
 			regressor_predictions.append(np.expm1(T))
 
 		bootstrap_scores.append(np.mean(regressor_scores))
-		bootstrap_predictions.append(np.mean(regressor_predictions))
+		bootstrap_predictions.append(np.mean(regressor_predictions, axis=0))
 
 	fold_scores.append(np.mean(bootstrap_scores))
-	fold_predictions.append(np.mean(bootstrap_predictions))
+	fold_predictions.append(np.mean(bootstrap_predictions, axis=0))
 
 del X_all
 
