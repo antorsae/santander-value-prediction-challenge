@@ -7,6 +7,9 @@ import pickle
 from xgtrain import StatsTransformer, get_stat_funs, UniqueTransformer
 import xgboost as xgb
 from sklearn.utils import resample
+from sklearn.svm import SVR
+from sklearn.feature_selection import SelectKBest
+from copy import copy
 
 batch_size = 1500
 #epochs = (4,4,5,4,4)
@@ -237,7 +240,7 @@ else:
 #	meta_X = pd.read_csv('meta.csv')
 
 from sklearn.mixture import GaussianMixture
-from sklearn.decomposition import PCA, LatentDirichletAllocation, SparsePCA, TruncatedSVD
+from sklearn.decomposition import PCA, LatentDirichletAllocation, SparsePCA, TruncatedSVD, FastICA
 from sklearn.random_projection import GaussianRandomProjection, SparseRandomProjection
 from sklearn.metrics import mean_squared_error
 
@@ -251,6 +254,7 @@ tsvd_X = transform_X(TruncatedSVD, n_components=num_decompose, random_state=rand
 grp_X  = transform_X(GaussianRandomProjection, n_components=num_decompose, eps=0.1, random_state=random_state)
 srp_X  = transform_X(SparseRandomProjection, n_components=num_decompose, dense_output=True, random_state=random_state)
 spca_X = transform_X(SparsePCA, n_components=num_decompose, random_state=random_state)
+ica_X =  transform_X(FastICA, n_components=num_decompose, random_state=random_state)
 
 #Xnn = X.values.copy()
 meta_X = None
@@ -263,7 +267,7 @@ X_drop = X.drop(drop_cols, axis=1)
 #X_all = pd.concat([X_drop, meta_X, manifold_X, pca_X, tsvd_X, grp_X, srp_X, spca_X, lda_X], axis=1, sort=False)
 #X_all = pd.concat([X_drop, meta_X, manifold_X, pca_X, tsvd_X], axis=1, sort=False)
 #X_all = pd.concat([ X, meta_X], axis=1, sort=False)
-X_all = pd.concat([X, meta_X, manifold_X, pca_X, tsvd_X, grp_X, srp_X, spca_X, lda_X], axis=1, sort=False)
+X_all = pd.concat([X, meta_X, manifold_X, pca_X, tsvd_X, grp_X, srp_X, spca_X, lda_X, ica_X], axis=1, sort=False)
 
 print(X_all.values.shape)
 
@@ -272,6 +276,8 @@ X_all = X_all.T.drop_duplicates().T
 #X_all = ut.transform(X_all.values)
 
 print(X_all.shape)
+
+
 
 #del X_drop, pca, tsvd, grp, srp, pca_X, tsvd_X, grp_X, srp_X, lda_X
 
@@ -282,7 +288,7 @@ from sklearn.model_selection import KFold
 #    pickle.dump((IDX_train, IDX_test), handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-print('start training of CatBoost...')
+print('start training...')
 
 
 xgb_params = {
@@ -308,8 +314,19 @@ xgb_fit_params = {
     'verbose': False,
 }
 
+def score_features(X, y, estimator=None):
+    return copy(estimator).fit(X, y).feature_importances_
+
+xgb_regressor = xgb.XGBRegressor(**xgb_params)
+
+fs = SelectKBest(score_func=lambda X, y: score_features(X, y, estimator=xgb_regressor), k=120).fit(X_all[:Y.shape[0]], Y)
+
+X_all = X_all.iloc[:, fs.get_support(indices=True)]
+
+print(X_all.shape)
+
 folds = 10
-bootstrap_runs = 5
+bootstrap_runs = 1
 
 fold_scores = []
 fold_predictions = []
@@ -327,11 +344,15 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(KFold(n_splits=folds, random_st
 
 		print(f' Boostrapping run {bootstrap_run+1}/{bootstrap_runs}:')
 
-		IDX_train = resample(_IDX_train, n_samples=len(_IDX_train))
+		if bootstrap_runs > 1:
+			IDX_train = resample(_IDX_train, n_samples=len(_IDX_train))
+		else:
+			IDX_train = _IDX_train
+
 		train_idx_seen = train_idx_seen.union(set(IDX_train))
 
 		# add those unseen items in the last run to make sure we use all training samples
-		if bootstrap_run == bootstrap_runs -1:
+		if (bootstrap_run == bootstrap_runs -1) and (bootstrap_runs > 1):
 			IDX_train = np.hstack([IDX_train, list(train_idx_total.difference(train_idx_seen))])
 
 		X_train = X_all.iloc[IDX_train].values
@@ -353,14 +374,21 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(KFold(n_splits=folds, random_st
 
 		xgb_regressor = xgb.XGBRegressor(**xgb_params)
 
+		svm_regressor = SVR(kernel='rbf', cache_size=20e3)
+
 		regressor_scores = []
 		regressor_predictions = []
-		#for regressor, fit_params in [(xgb_regressor, xgb_fit_params), (cb_clf, {})]:
-		for regressor, fit_params in [(xgb_regressor, xgb_fit_params)]:#, (cb_clf, {})]:
-#		for regressor, fit_params in [(cb_clf, {})]:
-			regressor.fit(X_train, Y_train, eval_set=[(X_test, Y_test)], **fit_params)
+		for regressor, fit_params in [(xgb_regressor, xgb_fit_params), (cb_clf, {})]:
+		#for regressor, fit_params in [(xgb_regressor, xgb_fit_params)]:#, (cb_clf, {})]:
+		#for regressor, fit_params in [(cb_clf, {})]:
+		#for regressor, fit_params in [(svm_regressor, {})]:
+			if not isinstance(regressor, SVR):
+				fit_params['eval_set']=[(X_test, Y_test)]
+			regressor.fit(X_train, Y_train, **fit_params)
 			if isinstance(regressor, xgb.XGBRegressor):
 				score = regressor.best_score
+			elif isinstance(regressor, SVR):
+				score =  np.sqrt(mean_squared_error(regressor.predict(X_test), Y_test))
 			else:
 				score =  np.sqrt(mean_squared_error(regressor.get_test_eval(), Y_test))
 
