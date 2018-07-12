@@ -5,23 +5,92 @@ import numpy as np
 import pandas as pd
 import pickle
 from xgtrain import StatsTransformer, get_stat_funs, UniqueTransformer
+from sklearn.base import clone
+from sklearn.mixture import GaussianMixture
+from sklearn.decomposition import PCA, LatentDirichletAllocation, SparsePCA, TruncatedSVD, FastICA
+from sklearn.random_projection import GaussianRandomProjection, SparseRandomProjection
+from sklearn.metrics import mean_squared_error
+from sklearn.preprocessing import MinMaxScaler
+import operator
+import multiprocessing
+
 import xgboost as xgb
 from sklearn.utils import resample
 from sklearn.svm import SVR
 from sklearn.feature_selection import SelectKBest
 from copy import copy
+import argparse
+import itertools
+
+allowed_decompositions = set(list('plstigra'))
+allowed_regressors     = set(list('cx'))
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-d', nargs='*',                type=str, help='Decompositions to use, any of {" ".join(allowed_decompositions)}')
+parser.add_argument('-r', nargs='+', default=['x'], type=str, help='Regressors to use, any of {" ".join(allowed_decompositions)}')
+
+parser.add_argument('-n',  '--num-decompose',  default=20,   type=int, help='Components for dimensionality redux')
+parser.add_argument('-md', '--meta-depth',     default=0,    type=int, help='Depth for calculating meta-features splits(0 to disable), e.g. -md 6')
+parser.add_argument('-mb', '--meta-base',      default=2,    type=int, help='Base for calculating meta-features splits, e.g. -mb 7')
+parser.add_argument('-mm', '--meta-mul',       action='store_true',    help='Use multiplications instead of powers for meta-features splits')
+parser.add_argument('-f',  '--folds',          default=5,    type=int, help='K-Folds')
+parser.add_argument('-b',  '--bootstrap-runs', default=1,    type=int, help='Bagging runs')
+parser.add_argument('-s',  '--select-k-best',  default=None, type=int, help='Select K Best features, e.g. -s 120')
+parser.add_argument(       '--drop',           action='store_true',    help='Drop redundant colums')
+parser.add_argument(       '--dropX',          action='store_true',    help='Drop X altogether')
+parser.add_argument(       '--olivier',        action='store_true',    help='Only use features in https://www.kaggle.com/ogrellier/santander-46-features/code')
+parser.add_argument('-w',  '--weighted',       action='store_true',    help='Weight training samples based on similarity vs test distribution')
+
+a = parser.parse_args()
+print(a.d)
+
+if a.d == []:
+	a.d = list(allowed_decompositions)
+
+if a.d:
+	decompositions = sorted(set(itertools.chain.from_iterable([list(s) for s in a.d])))
+else:
+	decompositions = []
+
+# p PCA
+# l LatentDirichletAllocation
+# s SparsePCA
+# t TruncatedSVD
+# i FastICA
+# g GaussianRandomProjection
+# r SparseRandomProjection
+# a autoencoder
+if decompositions != []:
+	assert allowed_decompositions.issuperset(set(decompositions))
+
+regressors     = sorted(set(itertools.chain.from_iterable([list(s) for s in a.r])))
+# c CatBoostRegressor
+# x XGBRegressor
+assert allowed_regressors.issuperset(set(regressors))
+
+print(f"Using {decompositions} compositions and {regressors} regressors")
+
+def get_olivier_features(): # from https://www.kaggle.com/ogrellier/santander-46-features/code
+    return [
+        'f190486d6', 'c47340d97', 'eeb9cd3aa', '66ace2992', 'e176a204a',
+        '491b9ee45', '1db387535', 'c5a231d81', '0572565c2', '024c577b9',
+        '15ace8c9f', '23310aa6f', '9fd594eec', '58e2e02e6', '91f701ba2',
+        'adb64ff71', '2ec5b290f', '703885424', '26fc93eb7', '6619d81fc',
+        '0ff32eb98', '70feb1494', '58e056e12', '1931ccfdd', '1702b5bf0',
+        '58232a6fb', '963a49cdc', 'fc99f9426', '241f0f867', '5c6487af1',
+        '62e59a501', 'f74e8f13d', 'fb49e4212', '190db8488', '324921c7b',
+        'b43a7cfd5', '9306da53f', 'd6bb78916', 'fb0f5dbfe', '6eef030c1'
+    ]
 
 batch_size = 1500
-#epochs = (4,4,5,4,4)
 epochs = (6,6,6,5,5)
-num_decompose = 20
+num_decompose = a.num_decompose
 
 time_fs = time.time()
 np.random.seed(22)
 
-X_FEATHER = 'mx_X.fth'
-#Y_FEATHER = 'mx_Y.fth'
-MX_PKL = 'mx.pkl'
+X_FEATHER = 'cache/mx_X.fth'
+MX_PKL = 'cache/mx.pkl'
 
 print('read data:')
 if not os.path.exists(X_FEATHER):
@@ -48,7 +117,7 @@ if not os.path.exists(X_FEATHER):
 else:
 	#Y = pd.read_feather(Y_FEATHER)
 	X = pd.read_feather(X_FEATHER)
-	(Y, ID, drop_cols) = pickle.load(open(MX_PKL, "rb" ) )
+	(Y, ID, drop_cols) = pickle.load(open(MX_PKL, "rb" ) )	
 
 def get_manifold(X):
 	from mxnet import nd, Context
@@ -195,10 +264,9 @@ def get_manifold(X):
 
 def transform_X(transform_fn, X=X, suffix='', **transform_fn_args):
 	transform_name = transform_fn.__name__
-	print(transform_name)
 	arg_names = '_'.join([f'{k}_{v.__str__()}' for k,v in transform_fn_args.items() if not isinstance(v, list)])
-	feather_name = f'mx_{transform_name}_{arg_names}_X{suffix}_{X.shape[0]}_{X.shape[1]}.fth'
-	print(feather_name)
+	feather_name = f'cache/mx_{transform_name}_{arg_names}_X{suffix}_{X.shape[0]}_{X.shape[1]}.fth'
+	print(transform_name, feather_name)
 	if not os.path.exists(feather_name):
 		transform = transform_fn(**transform_fn_args)
 		transform_X = pd.DataFrame(transform.fit_transform(X))
@@ -225,49 +293,59 @@ def get_meta():
 
 	return meta_X
 
-manifold_name = f'mx_manifold_X.csv'
-if not os.path.exists(manifold_name):
-	X_norm = np.log1p(X)
-	X_norm = X_norm.div(X_norm.max(), axis='columns')
-	manifold_X = get_manifold(X_norm)
-	manifold_X.to_csv(manifold_name, index=False)
-else:
-	manifold_X = pd.read_csv(manifold_name)
-
-#if not os.path.exists('meta.csv'):
-#	meta_X.to_csv('meta.csv', index=False)
-#else:#
-#	meta_X = pd.read_csv('meta.csv')
-
-from sklearn.mixture import GaussianMixture
-from sklearn.decomposition import PCA, LatentDirichletAllocation, SparsePCA, TruncatedSVD, FastICA
-from sklearn.random_projection import GaussianRandomProjection, SparseRandomProjection
-from sklearn.metrics import mean_squared_error
+if 'a' in decompositions:
+	manifold_name = f'cache/mx_manifold_X.csv'
+	if not os.path.exists(manifold_name):
+		X_norm = np.log1p(X)
+		X_norm = X_norm.div(X_norm.max(), axis='columns')
+		manifold_X = get_manifold(X_norm)
+		manifold_X.to_csv(manifold_name, index=False)
+	else:
+		manifold_X = pd.read_csv(manifold_name)
 
 random_state = 17
 
-lda_X = transform_X(LatentDirichletAllocation, n_components=num_decompose)
+X_all_type =''
+if a.olivier:
+	X = X[get_olivier_features()]
+	X_all_type += 'olivier_'
+
+if a.dropX:
+	X_all = None
+	X_all_type += 'dropX'
+elif a.drop:
+	X_all = X.drop(drop_cols, axis=1)
+	X_all_type += 'drop'
+else:
+	X_all = X
+	X_all_type += 'X'
+
+if 'l' in decompositions: X_all = pd.concat([X_all, transform_X(LatentDirichletAllocation, n_components=num_decompose)], axis=1, sort=False)
 
 X[X==0.0] = -1.0
-pca_X  = transform_X(PCA, n_components=num_decompose, random_state=random_state)
-tsvd_X = transform_X(TruncatedSVD, n_components=num_decompose, random_state=random_state)
-grp_X  = transform_X(GaussianRandomProjection, n_components=num_decompose, eps=0.1, random_state=random_state)
-srp_X  = transform_X(SparseRandomProjection, n_components=num_decompose, dense_output=True, random_state=random_state)
-spca_X = transform_X(SparsePCA, n_components=num_decompose, random_state=random_state)
-ica_X =  transform_X(FastICA, n_components=num_decompose, random_state=random_state)
+if 'p' in decompositions: X_all = pd.concat([X_all, transform_X(PCA, n_components=num_decompose, random_state=random_state)], axis=1, sort=False)
+if 't' in decompositions: X_all = pd.concat([X_all, transform_X(TruncatedSVD, n_components=num_decompose, random_state=random_state)], axis=1, sort=False)
+if 'g' in decompositions: X_all = pd.concat([X_all, transform_X(GaussianRandomProjection, n_components=num_decompose, eps=0.1, random_state=random_state)], axis=1, sort=False)
+if 'r' in decompositions: X_all = pd.concat([X_all, transform_X(SparseRandomProjection, n_components=num_decompose, dense_output=True, random_state=random_state)], axis=1, sort=False)
+if 's' in decompositions: X_all = pd.concat([X_all, transform_X(SparsePCA, n_components=num_decompose, random_state=random_state)], axis=1, sort=False)
+if 'i' in decompositions: X_all = pd.concat([X_all, transform_X(FastICA, n_components=num_decompose, random_state=random_state)], axis=1, sort=False)
+
+if a.weighted:
+	pca = transform_X(PCA, n_components=num_decompose, random_state=random_state)
+	test_mean = np.mean(pca[Y.shape[0]:], axis=0)
+	train_distances = np.linalg.norm(pca[:Y.shape[0]]- test_mean, axis=1)
+	train_weights = MinMaxScaler(feature_range=(1, 100), copy=True).fit_transform(np.expand_dims(1. / np.log1p(train_distances), axis=1))
 
 #Xnn = X.values.copy()
-meta_X = None
-for nn in range(6):
-	for nnn, Xn in enumerate(np.array_split(X.values, 2**nn, axis=1)):
-		meta = transform_X(StatsTransformer,X = Xn, suffix=f'{nn}-{nnn}', stat_funs=get_stat_funs(), verbose=2)
-		meta_X = pd.concat([meta, meta_X], axis=1, sort=False) if meta_X is not None else meta
-
-X_drop = X.drop(drop_cols, axis=1)
-#X_all = pd.concat([X_drop, meta_X, manifold_X, pca_X, tsvd_X, grp_X, srp_X, spca_X, lda_X], axis=1, sort=False)
-#X_all = pd.concat([X_drop, meta_X, manifold_X, pca_X, tsvd_X], axis=1, sort=False)
-#X_all = pd.concat([ X, meta_X], axis=1, sort=False)
-X_all = pd.concat([X, meta_X, manifold_X, pca_X, tsvd_X, grp_X, srp_X, spca_X, lda_X, ica_X], axis=1, sort=False)
+if a.meta_depth != 0:
+	meta_X = None
+	def op_mul(a,b): return 1 if b ==0 else a*b
+	meta_op = op_mul if a.meta_mul else operator.pow
+	for nn in range(a.meta_depth):
+		for nnn, Xn in enumerate(np.array_split(X.values, meta_op(a.meta_base, nn), axis=1)):
+			meta = transform_X(StatsTransformer,X = Xn, suffix=f'{a.meta_base}-{nn}-{nnn}', stat_funs=get_stat_funs(), verbose=2)
+			meta_X = pd.concat([meta, meta_X], axis=1, sort=False) if meta_X is not None else meta
+	X_all = pd.concat([X_all, meta_X], axis=1, sort=False)
 
 print(X_all.values.shape)
 
@@ -277,19 +355,8 @@ X_all = X_all.T.drop_duplicates().T
 
 print(X_all.shape)
 
-
-
-#del X_drop, pca, tsvd, grp, srp, pca_X, tsvd_X, grp_X, srp_X, lda_X
-
 from catboost import CatBoostRegressor
 from sklearn.model_selection import KFold
-
-#with open('X_all_idx_train_test.pickle', 'wb') as handle:
-#    pickle.dump((IDX_train, IDX_test), handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-
-print('start training...')
-
 
 xgb_params = {
     #'tree_method' : 'gpu_hist',
@@ -305,7 +372,7 @@ xgb_params = {
     'subsample': 0.8,
     'colsample_bytree': 0.055*2,
     'colsample_bylevel': 0.50*2,
-    'n_jobs': -1,
+    'n_jobs': multiprocessing.cpu_count(),
     'random_state': 456,
     }
 xgb_fit_params = {
@@ -314,19 +381,23 @@ xgb_fit_params = {
     'verbose': False,
 }
 
-def score_features(X, y, estimator=None):
-    return copy(estimator).fit(X, y).feature_importances_
+if a.select_k_best is not None:
+	print(f"Selecting {a.select_k_best} best features")
+	def score_features(X, y, estimator=None):
+	    return clone(estimator).fit(X, y).feature_importances_
 
-xgb_regressor = xgb.XGBRegressor(**xgb_params)
+	xgb_regressor = xgb.XGBRegressor(**xgb_params)
 
-fs = SelectKBest(score_func=lambda X, y: score_features(X, y, estimator=xgb_regressor), k=120).fit(X_all[:Y.shape[0]], Y)
+	fs = SelectKBest(score_func=lambda X, y: score_features(X, y, estimator=xgb_regressor), k=a.select_k_best).fit(X_all[:Y.shape[0]], Y)
 
-X_all = X_all.iloc[:, fs.get_support(indices=True)]
+	X_all = X_all.iloc[:, fs.get_support(indices=True)]
 
 print(X_all.shape)
 
-folds = 10
-bootstrap_runs = 1
+print('start training...')
+
+folds = a.folds
+bootstrap_runs = a.bootstrap_runs
 
 fold_scores = []
 fold_predictions = []
@@ -370,7 +441,8 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(KFold(n_splits=folds, random_st
 									od_type='Iter',
 									metric_period = 200,
 									od_wait=200,
-									l2_leaf_reg = None)
+									l2_leaf_reg = None,
+									)
 
 		xgb_regressor = xgb.XGBRegressor(**xgb_params)
 
@@ -378,12 +450,18 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(KFold(n_splits=folds, random_st
 
 		regressor_scores = []
 		regressor_predictions = []
-		for regressor, fit_params in [(xgb_regressor, xgb_fit_params), (cb_clf, {})]:
-		#for regressor, fit_params in [(xgb_regressor, xgb_fit_params)]:#, (cb_clf, {})]:
-		#for regressor, fit_params in [(cb_clf, {})]:
-		#for regressor, fit_params in [(svm_regressor, {})]:
+
+		regressor_list = []
+		if 'x' in regressors: regressor_list.append((xgb_regressor, xgb_fit_params))
+		if 'c' in regressors: regressor_list.append((cb_clf, {}))
+		assert (len(regressor_list) > 0) and (len(regressor_list) == len(regressors))
+
+		for regressor, fit_params in regressor_list:
 			if not isinstance(regressor, SVR):
 				fit_params['eval_set']=[(X_test, Y_test)]
+			if a.weighted:
+				fit_params['sample_weight'] = train_weights
+
 			regressor.fit(X_train, Y_train, **fit_params)
 			if isinstance(regressor, xgb.XGBRegressor):
 				score = regressor.best_score
@@ -411,6 +489,6 @@ print(f'Average RMSE: {average_rmse}')
 submissions = np.mean(fold_predictions, axis=0)
 result = pd.DataFrame({'ID':ID
 					,'target':submissions})
-result.to_csv(f'submission_{average_rmse}_{folds}folds_{bootstrap_runs}bootstraps.csv', index=False)
+result.to_csv(f"csv/sub{'_w' if a.weighted else ''}_{X_all_type}_n{a.num_decompose}_d{''.join(decompositions)}_m{a.meta_base}{'mul' if a.meta_mul else 'pow'}{a.meta_depth}_s{a.select_k_best}_r{''.join(regressors)}_f{folds}_b{bootstrap_runs}_RMSE{average_rmse}.csv", index=False)
 
 print('end')
