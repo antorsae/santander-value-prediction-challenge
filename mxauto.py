@@ -13,6 +13,7 @@ from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import MinMaxScaler
 import operator
 import multiprocessing
+from tqdm import tqdm
 
 import xgboost as xgb
 from sklearn.utils import resample
@@ -40,8 +41,22 @@ parser.add_argument(       '--drop',           action='store_true',    help='Dro
 parser.add_argument(       '--dropX',          action='store_true',    help='Drop X altogether')
 parser.add_argument(       '--olivier',        action='store_true',    help='Only use features in https://www.kaggle.com/ogrellier/santander-46-features/code')
 parser.add_argument('-w',  '--weighted',       action='store_true',    help='Weight training samples based on similarity vs test distribution')
+parser.add_argument('-bh', '--bins',           default=0,    type=int, help='Bins for histogram')
+parser.add_argument(       '--pseudo',         default='baseline_submission_with_leaks_all_1000.csv',    help='Pseudo-labeling')
+
+parser.add_argument(       '--debug',          action='store_true',    help='Wait for remote debugger to attach')
 
 a = parser.parse_args()
+
+if a.debug:
+	import ptvsd
+
+	# Allow other computers to attach to ptvsd at this IP address and port, using the secret
+	ptvsd.enable_attach("", address = ('0.0.0.0', 3000))
+
+	# Pause the program until a remote debugger is attached
+	ptvsd.wait_for_attach()
+
 print(a.d)
 
 if a.d == []:
@@ -118,6 +133,9 @@ else:
 	#Y = pd.read_feather(Y_FEATHER)
 	X = pd.read_feather(X_FEATHER)
 	(Y, ID, drop_cols) = pickle.load(open(MX_PKL, "rb" ) )	
+
+
+pseudo_Y =  np.log1p(pd.read_csv(a.pseudo)['target'].values) if a.pseudo else None
 
 def get_manifold(X):
 	from mxnet import nd, Context
@@ -276,23 +294,6 @@ def transform_X(transform_fn, X=X, suffix='', **transform_fn_args):
 		transform_X = pd.read_feather(feather_name)
 	return transform_X
 
-def get_meta():
-	if False:
-		meta_X = pd.DataFrame({
-			'soz':(X[X==0]).fillna(1).sum(axis=1),
-			'mean':X.mean(axis=1),
-			'std' :X.std(axis=1),
-			'nzm' :X[X!=0].mean(axis=1),
-			'nzs' :X[X!=0].std(axis=1),
-			'med' :X[X!=0].median(axis=1),
-			'max' :X[X!=0].max(axis=1),
-			'min' :X[X!=0].min(axis=1),
-			'var' :X[X!=0].var(axis=1)})
-	else:
-		meta_X = transform_X(StatsTransformer,X = X.values, stat_funs=get_stat_funs(), verbose=2)
-
-	return meta_X
-
 if 'a' in decompositions:
 	manifold_name = f'cache/mx_manifold_X.csv'
 	if not os.path.exists(manifold_name):
@@ -305,24 +306,44 @@ if 'a' in decompositions:
 
 random_state = 17
 
+X_all = pd.DataFrame(index=X.index)
 X_all_type =''
+
+if a.bins != 0:
+	_X = np.log1p(X.values)
+	X_min, X_max = _X[_X>0].min(), _X.max()
+	print(X_min, X_max, a.bins)
+	X_bins = [0] + np.linspace(X_min, X_max, a.bins).tolist()
+	X_bins[-1] += 1
+	X_hist = np.zeros((_X.shape[0], len(X_bins)-1), dtype=int)
+	for i in tqdm(range(_X.shape[0])):
+	    X_hist[i] = np.histogram(_X[i], X_bins)[0]
+
+	X_all = pd.concat([X_all, pd.DataFrame(X_hist)], axis=1, sort=False)
+	X_all_type += f'bh{a.bins}_'
+
 if a.olivier:
+
 	X = X[get_olivier_features()]
 	X_all_type += 'olivier_'
 
+idx_X_zeros = X==0.0
+Xnan = X.copy()
+Xnan[idx_X_zeros] = np.nan
+
 if a.dropX:
-	X_all = None
 	X_all_type += 'dropX'
+	# no concat
 elif a.drop:
-	X_all = X.drop(drop_cols, axis=1)
+	X_all = pd.concat([X_all,  Xnan.drop(drop_cols, axis=1)], axis=1, sort=False)
 	X_all_type += 'drop'
 else:
-	X_all = X
+	X_all = pd.concat([X_all,  Xnan], axis=1, sort=False)
 	X_all_type += 'X'
 
 if 'l' in decompositions: X_all = pd.concat([X_all, transform_X(LatentDirichletAllocation, n_components=num_decompose)], axis=1, sort=False)
 
-X[X==0.0] = -1.0
+#X[idx_X_zeros] = -1.0
 if 'p' in decompositions: X_all = pd.concat([X_all, transform_X(PCA, n_components=num_decompose, random_state=random_state)], axis=1, sort=False)
 if 't' in decompositions: X_all = pd.concat([X_all, transform_X(TruncatedSVD, n_components=num_decompose, random_state=random_state)], axis=1, sort=False)
 if 'g' in decompositions: X_all = pd.concat([X_all, transform_X(GaussianRandomProjection, n_components=num_decompose, eps=0.1, random_state=random_state)], axis=1, sort=False)
@@ -360,7 +381,7 @@ from sklearn.model_selection import KFold
 
 xgb_params = {
     #'tree_method' : 'gpu_hist',
-    'n_estimators': 15000,
+    'n_estimators': 1000,
     'objective': 'reg:linear',
     'booster': 'gbtree',
     'learning_rate': 0.02,
@@ -378,7 +399,7 @@ xgb_params = {
 xgb_fit_params = {
     'early_stopping_rounds': 200,
     'eval_metric': 'rmse',
-    'verbose': False,
+    'verbose': True,
 }
 
 if a.select_k_best is not None:
@@ -402,8 +423,16 @@ bootstrap_runs = a.bootstrap_runs
 fold_scores = []
 fold_predictions = []
 
-for fold_id, (_IDX_train, IDX_test) in enumerate(KFold(n_splits=folds, random_state=random_state, shuffle=False).split(Y)):
+print(np.arange(len(Y)).shape, np.where(pseudo_Y !=0)[0].shape)
+to_train_idx = np.hstack([np.arange(len(Y)), len(Y) + np.where(pseudo_Y !=0)[0]])
 
+X_all_to_train = X_all.iloc[to_train_idx]
+Y_all_to_train = np.hstack([Y, pseudo_Y[pseudo_Y!=0]])
+
+for fold_id, (_IDX_train, IDX_test) in enumerate(
+	KFold(n_splits=folds, random_state=random_state, shuffle=False).split(Y_all_to_train) if folds > 1 else [(range(len(Y_to_train)), None)] ):
+
+	#print(len(_IDX_train), len(IDX_test))
 	print(f'K-Fold run {fold_id+1}/{folds}:')
 	train_idx_seen  = set()
 	train_idx_total = set(_IDX_train)
@@ -426,11 +455,12 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(KFold(n_splits=folds, random_st
 		if (bootstrap_run == bootstrap_runs -1) and (bootstrap_runs > 1):
 			IDX_train = np.hstack([IDX_train, list(train_idx_total.difference(train_idx_seen))])
 
-		X_train = X_all.iloc[IDX_train].values
-		X_test =  X_all.iloc[IDX_test].values
+		X_train = X_all_to_train.iloc[IDX_train].values
+		Y_train = Y_all_to_train[IDX_train]
 
-		Y_train = Y[IDX_train]
-		Y_test =  Y[IDX_test]
+		if IDX_test is not None:
+			X_test =  X_all_to_train.iloc[IDX_test].values
+			Y_test =  Y_all_to_train[IDX_test]
 
 		cb_clf = CatBoostRegressor(iterations=30000,
 									learning_rate=0.005,
@@ -457,7 +487,7 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(KFold(n_splits=folds, random_st
 		assert (len(regressor_list) > 0) and (len(regressor_list) == len(regressors))
 
 		for regressor, fit_params in regressor_list:
-			if not isinstance(regressor, SVR):
+			if IDX_test is not None and not isinstance(regressor, SVR):
 				fit_params['eval_set']=[(X_test, Y_test)]
 			if a.weighted:
 				fit_params['sample_weight'] = train_weights
@@ -487,6 +517,7 @@ average_rmse = np.mean(fold_scores)
 print(f'Average RMSE: {average_rmse}')
 
 submissions = np.mean(fold_predictions, axis=0)
+submissions[pseudo_Y != 0] = np.expm1(pseudo_Y[pseudo_Y != 0])
 result = pd.DataFrame({'ID':ID
 					,'target':submissions})
 result.to_csv(f"csv/sub{'_w' if a.weighted else ''}_{X_all_type}_n{a.num_decompose}_d{''.join(decompositions)}_m{a.meta_base}{'mul' if a.meta_mul else 'pow'}{a.meta_depth}_s{a.select_k_best}_r{''.join(regressors)}_f{folds}_b{bootstrap_runs}_RMSE{average_rmse}.csv", index=False)
