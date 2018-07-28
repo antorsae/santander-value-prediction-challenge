@@ -40,6 +40,8 @@ parser.add_argument('-s',  '--select-k-best',  default=None, type=int, help='Sel
 parser.add_argument(       '--drop',           action='store_true',    help='Drop redundant colums')
 parser.add_argument(       '--dropX',          action='store_true',    help='Drop X altogether')
 parser.add_argument(       '--olivier',        action='store_true',    help='Only use features in https://www.kaggle.com/ogrellier/santander-46-features/code')
+parser.add_argument('-cg', '--column-groups',  action='store_true',    help='Only use features in discovered leak')
+parser.add_argument('-ds', '--drop-selected',  action='store_true',    help='Drop selected colums')
 parser.add_argument('-w',  '--weighted',       action='store_true',    help='Weight training samples based on similarity vs test distribution')
 parser.add_argument('-bh', '--bins',           default=0,    type=int, help='Bins for histogram')
 parser.add_argument(       '--pseudo',         default='baseline_submission_with_leaks_all_1000.csv',    help='Pseudo-labeling')
@@ -306,7 +308,16 @@ def get_column_groups():
 		'3a07a8939', '129fe0263', 'e5b2d137a', 'aa7223176', '5ac7e84c4',
 		'9bd66acf6', '4c938629c', 'e62c5ac64', '57535b55a', 'a1a0084e3',
 		'2a3763e18', '474a9ec54', '0741f3757', '4fe8b17c2', 'd5754aa08'
-	]]
+	], [
+		'f1eeb56ae', '62ffce458', '497adaff8', 'ed1d5d137', 'faf7285a1',
+		'd83da5921', '0231f07ed', '7950f4c11', '051410e3d', '39e1796ab',
+		'2e0148f29', '312832f30', '6f113540d', 'f3ee6ba3c', 'd9fc63fa1',
+		'6a0b386ac', '5747a79a9', '64bf3a12a', 'c110ee2b7', '1bf37b3e2',
+		'fdd07cac1', '0872fe14d', 'ddef5ad30', '42088cf50', '3519bf4a4',
+		'a79b1f060', '97cc1b416', 'b2790ef54', '1a7de209c', '2a71f4027',
+		'f118f693a', '15e8a9331', '0c545307d', '363713112', '73e591019',
+		'21af91e9b', '62a915028', '2ab5a56f5', 'a8ee55662', '316b978cd'
+	] ]
 
 batch_size = 1500
 epochs = (6,6,6,5,5)
@@ -534,10 +545,17 @@ if a.bins != 0:
 	X_all = pd.concat([X_all, pd.DataFrame(X_hist)], axis=1, sort=False)
 	X_all_type += f'bh{a.bins}_'
 
+selected = None
+if a.drop_selected: X_all_type += 'dropped'
 if a.olivier:
-
-	X = X[get_olivier_features()]
+	selected = get_olivier_features()
 	X_all_type += 'olivier_'
+elif a.column_groups:
+	selected = list(itertools.chain.from_iterable(get_column_groups()) )
+	X_all_type += 'columngroups_'
+
+if selected:
+	X = X[selected] if not a.drop_selected else X.drop(selected, axis=1)
 
 idx_X_zeros = X==0.0
 Xnan = X.copy()
