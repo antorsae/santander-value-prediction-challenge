@@ -251,9 +251,9 @@ COLMAP = dict()
 for i, col in enumerate(df.columns):
     COLMAP[col] = i
 
-X = df.values.T
+X = np.log1p(df.values.T)
 Y = TSNE(n_components=2, n_iter=1000, method='exact').fit_transform(X)
-#Y = TSNE(n_components=2, n_iter=1000).fit_transform(X)
+#Y = TSNE(n_components=2, n_iter=100000).fit_transform(X)
 np.save('Y', Y)
 
 fig = plt.figure()
