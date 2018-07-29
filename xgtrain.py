@@ -3,20 +3,24 @@
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-import lightgbm as lgb
+#import lightgbm as lgb
 from scipy.stats import skew, kurtosis
 
 from sklearn.base import BaseEstimator, TransformerMixin, RegressorMixin
 from sklearn.externals.joblib import Parallel, delayed
 from sklearn.base import clone, is_classifier
 from sklearn.model_selection._split import check_cv
+from sklearn.model_selection import GridSearchCV
 
 
 from sklearn.feature_selection import VarianceThreshold
-from sklearn.decomposition import PCA, LatentDirichletAllocation, SparsePCA, TruncatedSVD
+from sklearn.decomposition import PCA, LatentDirichletAllocation, SparsePCA, TruncatedSVD, FactorAnalysis
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline, FeatureUnion
+from sklearn.feature_selection import SelectKBest
 
+def score_features(X, y, estimator=None):
+    return clone(estimator).fit(X, y).feature_importances_
 
 class UniqueTransformer(BaseEstimator, TransformerMixin):
     
@@ -214,11 +218,11 @@ def get_stat_funs():
     """
     stat_funs = []
     
-    stats = [len, np.min, np.max, np.median, np.std, skew, kurtosis] + 19 * [np.percentile]
-    stats_kwargs = [{} for i in range(7)] + [{'q': i} for i in np.linspace(0.05, 0.95, 19)]
+    stats = [len, np.mean, np.min, np.max, np.median, np.std, skew, kurtosis] + 19 * [np.percentile]
+    stats_kwargs = [{} for i in range(8)] + [{'q': i} for i in np.linspace(0.05, 0.95, 19)]
 
     for stat, stat_kwargs in zip(stats, stats_kwargs):
-        stat_funs.append(_StatFunAdaptor(stat,**stat_kwargs))
+        stat_funs.append(_StatFunAdaptor(stat, **stat_kwargs))
         stat_funs.append(_StatFunAdaptor(stat, np.diff, **stat_kwargs))
         stat_funs.append(_StatFunAdaptor(stat, diff2, **stat_kwargs))
         stat_funs.append(_StatFunAdaptor(stat, np.unique, **stat_kwargs))
@@ -255,12 +259,12 @@ def get_data():
 def main():
     
     xgb_params = {
-        'tree_method' : 'gpu_hist',
+        #'tree_method' : 'gpu_hist',
         'n_estimators': 1500,
         'objective': 'reg:linear',
         'booster': 'gbtree',
         'learning_rate': 0.02,
-        'max_depth': 22,
+        'max_depth': 10, #22,
         'min_child_weight': 57,
         'gamma' : 1.45,
         'alpha': 0.0,
@@ -287,16 +291,24 @@ def main():
         'eval_metric': 'rmse',
         'verbose': False,
     }
+
+    xgb_cv = XGBRegressorCV(
+                    regressor  = xgb.XGBRegressor,
+                    xgb_params = xgb_params,
+                    fit_params = fit_params,
+                    cv=10,
+                )
     
     pipe = Pipeline(
         [
-            ('vt', VarianceThreshold(threshold=0.0)),
-            ('ut', UniqueTransformer()),
+            #('vt', VarianceThreshold(threshold=0.0)),
+            #('ut', UniqueTransformer()),
             ('fu', FeatureUnion(
                     [
                         ('pca1', PCA(n_components=100)),
                         ('spca1', SparsePCA(n_components=100)),
                         ('lda',  LatentDirichletAllocation(n_components=100)),
+                        ('fa1', FactorAnalysis(n_components=100)),
                         ('tsvd', TruncatedSVD(n_components=100)),
                         ('ct-2', ClassifierTransformer(get_rfc(50), n_classes=2, cv=5)),
                         ('ct-3', ClassifierTransformer(get_rfc(75), n_classes=3, cv=5)),
@@ -309,24 +321,22 @@ def main():
                     ]
                 )
             ),
-            ('xgb-cv', XGBRegressorCV(
-                    regressor  = xgb.XGBRegressor,
-                    xgb_params = xgb_params,
-                    fit_params = fit_params,
-                    cv=10,
-
-                )
-            )
+            #('skb', SelectKBest(score_func=lambda X, y: score_features(X, y, estimator=xgb_cv), k=120)),
+            ('xgb', xgb_cv),
         ],
-        memory = '.pipeline'
+        #memory = '.pipeline'
     )
     
     X_train, y_train_log, X_test, id_test = get_data()
     
+    param_grid = [dict(xgb__max_depth = [11,22,44])]
+
+    #pipe = GridSearchCV(_pipe, param_grid=param_grid)
+
     pipe.fit(X_train, y_train_log)
     #print(pipe.named_steps['xgb-cv'])
-    print(pipe.named_steps['xgb-cv'].cv_scores_)
-    cv_score = pipe.named_steps['xgb-cv'].cv_score_
+    print(pipe.named_steps['xgb'].cv_scores_)
+    cv_score = pipe.named_steps['xgb'].cv_score_
     print(cv_score)
 
     #assert False
