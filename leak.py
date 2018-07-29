@@ -410,14 +410,15 @@ _column_groups = [[
     '3ce1dedc9', '01b72b3dc', 'd95cab24f', 'fee2d3bf9', '6820130f1'
 ] ]
 
-def get_column_groups():
+def get_column_groups(include_giba=True):
     n_verified_groups = 23 + 9
-    column_groups = [_column_groups[group] for group in list(range(n_verified_groups)) + list(n_verified_groups + np.array([0,3,4])) ]
+    column_groups = [giba_columns] if include_giba else []
+    column_groups += [_column_groups[group] for group in list(range(n_verified_groups)) + list(n_verified_groups + np.array([0,3,4])) ]
     return column_groups
 
 if __name__ == "__main__":
 
-    column_groups = get_column_groups()
+    column_groups = get_column_groups(include_giba=False)
 
     print([column_group[0] for column_group in column_groups ])
 
