@@ -578,6 +578,7 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 			X_y = X_all[Y.shape[0]:].values
 			if X_y == []:
 				X_y = np.zeros((Y.shape[0], 0))
+			if a.oof:
 				for Y_oof in Y_oofs:
 					X_y = np.hstack([X_y, Y_oof])
 			T = regressor.predict(X_y)

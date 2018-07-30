@@ -414,7 +414,7 @@ def get_column_groups(include_giba=True):
     if True:
         # Giba's group is already included in the pk file
         column_groups = pickle.load(open('groups40.pk', 'rb'))
-        column_groups = [x for i,x in enumerate(column_groups) if i not in [8, 9, 14, 18, 33, 37, 42, 45, 49]]
+        column_groups = [x for i,x in enumerate(column_groups) if i not in [8, 9, 14, 37, 42, 45]]
         if not include_giba:
             column_groups.pop(0)
 
