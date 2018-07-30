@@ -32,6 +32,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('-d', nargs='*',                type=str, help='Decompositions to use, any of {" ".join(allowed_decompositions)}')
 parser.add_argument('-r', nargs='+', default=['x'], type=str, help='Regressors to use, any of {" ".join(allowed_decompositions)}')
 
+parser.add_argument('-o',   '--oof', nargs='+',                type=str, help='OOF predictions for L2 model')
+
 parser.add_argument('-n',  '--num-decompose',  default=20,   type=int, help='Components for dimensionality redux')
 parser.add_argument('-md', '--meta-depth',     default=0,    type=int, help='Depth for calculating meta-features splits(0 to disable), e.g. -md 6')
 parser.add_argument('-mb', '--meta-base',      default=2,    type=int, help='Base for calculating meta-features splits, e.g. -mb 7')
@@ -446,12 +448,25 @@ bootstrap_runs = a.bootstrap_runs
 
 fold_scores = []
 fold_predictions = []
+oof_fold_predictions = []
 
 print(np.arange(len(Y)).shape, np.where(pseudo_Y !=0)[0].shape)
 to_train_idx = np.hstack([np.arange(len(Y)), len(Y) + np.where(pseudo_Y !=0)[0]])
 
 X_all_to_train = X_all.iloc[to_train_idx]
 Y_all_to_train = np.hstack([Y, pseudo_Y[pseudo_Y!=0]])
+
+X_oofs = []
+Y_oofs = []
+if a.oof:
+	for oof_filename in a.oof:
+		print(oof_filename)
+		X_oof, Y_oof = pickle.load(open(oof_filename, 'rb'))
+		X_oofs.append(X_oof)
+		Y_oofs.append(Y_oof)
+
+for X_oof in X_oofs:
+	assert len(X_oof) == folds
 
 for fold_id, (_IDX_train, IDX_test) in enumerate(
 	KFold(n_splits=folds, random_state=random_state, shuffle=False).split(Y_all_to_train) if folds > 1 else [(range(len(Y_all_to_train)), None)] ):
@@ -463,6 +478,8 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 
 	bootstrap_scores = []
 	bootstrap_predictions = []
+	
+	oof_bootstrap_predictions = []
 
 	for bootstrap_run in range(bootstrap_runs):
 
@@ -482,9 +499,40 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 		X_train = X_all_to_train.iloc[IDX_train].values
 		Y_train = Y_all_to_train[IDX_train]
 
+		if X_train is []:
+			X_train = np.zeros((Y_train.shape[0],0))
+
 		if IDX_test is not None:
 			X_test =  X_all_to_train.iloc[IDX_test].values
 			Y_test =  Y_all_to_train[IDX_test]
+
+		if X_test is []:
+			X_test = np.zeros((Y_test.shape[0],0))
+
+		if X_oofs:
+			for X_oof in X_oofs:
+				print(X_train.shape, X_test.shape)
+				X_train_oof = X_test_oof = None
+
+				for oof_fold_id, X_oof_fold in enumerate(X_oof):
+					X_oof_fold = np.expand_dims(X_oof_fold, axis=-1)
+					print(X_oof_fold.shape)
+					if oof_fold_id != fold_id:
+						X_train_oof = np.vstack([X_train_oof, X_oof_fold]) if X_train_oof is not None else X_oof_fold
+						print(X_train_oof.shape)
+					else:
+						X_test_oof  = np.vstack([ X_test_oof, X_oof_fold]) if X_test_oof  is not None else X_oof_fold
+
+				#print(X_train_oof.shape, X_test_oof.shape)
+
+				print(X_train.shape, X_test.shape)
+				print(X_train_oof.shape, X_test_oof.shape)
+
+				X_train = np.hstack([X_train, X_train_oof])
+				X_test  = np.hstack([X_test,  X_test_oof])
+
+		print(X_train.shape)
+
 
 		cb_clf = CatBoostRegressor(iterations=30000,
 									learning_rate=0.005,
@@ -504,6 +552,7 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 
 		regressor_scores = []
 		regressor_predictions = []
+		oof_regressor_predictions = []
 
 		regressor_list = []
 		if 'x' in regressors: regressor_list.append((xgb_regressor, xgb_fit_params))
@@ -526,14 +575,22 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 
 			print(f" Score {score} @ k-fold {fold_id+1}/{folds} @ bootstrap {bootstrap_run+1}/{bootstrap_runs}")
 			regressor_scores.append(score)
-			T = regressor.predict(X_all[Y.shape[0]:].values)
+			X_y = X_all[Y.shape[0]:].values
+			if X_y == []:
+				X_y = np.zeros((Y.shape[0], 0))
+				for Y_oof in Y_oofs:
+					X_y = np.hstack([X_y, Y_oof])
+			T = regressor.predict(X_y)
 			regressor_predictions.append(np.expm1(T))
+			oof_regressor_predictions.append(np.expm1(regressor.predict(X_test)))
 
 		bootstrap_scores.append(np.mean(regressor_scores))
 		bootstrap_predictions.append(np.mean(regressor_predictions, axis=0))
+		oof_bootstrap_predictions.append(np.mean(oof_regressor_predictions, axis=0))
 
 	fold_scores.append(np.mean(bootstrap_scores))
 	fold_predictions.append(np.mean(bootstrap_predictions, axis=0))
+	oof_fold_predictions.append(np.mean(oof_bootstrap_predictions, axis=0))
 
 del X_all
 
@@ -542,8 +599,10 @@ print(f'Average RMSE: {average_rmse}')
 
 submissions = np.mean(fold_predictions, axis=0)
 submissions[pseudo_Y != 0] = np.expm1(pseudo_Y[pseudo_Y != 0])
-result = pd.DataFrame({'ID':ID
-					,'target':submissions})
-result.to_csv(f"csv/sub{'_du' if a.dummify_ugly else ''}{'_w' if a.weighted else ''}_{X_all_type}_n{a.num_decompose}_d{''.join(decompositions)}_m{a.meta_base}{'mul' if a.meta_mul else 'pow'}{a.meta_depth}_s{a.select_k_best}_r{''.join(regressors)}_f{folds}_b{bootstrap_runs}_RMSE{average_rmse}.csv", index=False)
+result = pd.DataFrame({'ID':ID,'target':submissions})
+basename = f"{'_du' if a.dummify_ugly else ''}{'_w' if a.weighted else ''}_{X_all_type}_n{a.num_decompose}_d{''.join(decompositions)}_m{a.meta_base}{'mul' if a.meta_mul else 'pow'}{a.meta_depth}_s{a.select_k_best}_r{''.join(regressors)}_f{folds}_b{bootstrap_runs}_RMSE{average_rmse}"
+result.to_csv(f"csv/sub{basename}.csv", index=False)
+if not a.oof:
+	pickle.dump( (oof_fold_predictions, fold_predictions), open( f"oof/{basename}.pkl", "wb" ) )
 
 print('end')
