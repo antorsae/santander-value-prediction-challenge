@@ -411,9 +411,17 @@ _column_groups = [[
 ] ]
 
 def get_column_groups(include_giba=True):
-    n_verified_groups = 23 + 9
-    column_groups = [giba_columns] if include_giba else []
-    column_groups += [_column_groups[group] for group in list(range(n_verified_groups)) + list(n_verified_groups + np.array([0,3,4])) ]
+    if True:
+        # Giba's group is already included in the pk file
+        column_groups = pickle.load(open('groups40.pk', 'rb'))
+        column_groups = [x for i,x in enumerate(column_groups) if i not in [8, 9, 14, 18, 33, 37, 42, 45, 49]]
+        if not include_giba:
+            column_groups.pop(0)
+
+    else:
+        n_verified_groups = 23 + 9
+        column_groups = [giba_columns] if include_giba else []
+        column_groups += [_column_groups[group] for group in list(range(n_verified_groups)) + list(n_verified_groups + np.array([0,3,4])) ]
     return column_groups
 
 if __name__ == "__main__":
