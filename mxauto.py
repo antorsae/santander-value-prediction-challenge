@@ -18,6 +18,7 @@ from tqdm import tqdm
 import xgboost as xgb
 from sklearn.utils import resample
 from sklearn.svm import SVR
+from sklearn.linear_model import LinearRegression
 from sklearn.feature_selection import SelectKBest
 from copy import copy
 import argparse
@@ -26,7 +27,7 @@ import itertools
 from leak import get_column_groups
 
 allowed_decompositions = set(list('plstigra'))
-allowed_regressors     = set(list('cx'))
+allowed_regressors     = set(list('cxl'))
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-d', nargs='*',                type=str, help='Decompositions to use, any of {" ".join(allowed_decompositions)}')
@@ -550,6 +551,8 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 
 		svm_regressor = SVR(kernel='rbf', cache_size=20e3)
 
+		lr_regressor = LinearRegression(n_jobs=-1)
+
 		regressor_scores = []
 		regressor_predictions = []
 		oof_regressor_predictions = []
@@ -557,10 +560,11 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 		regressor_list = []
 		if 'x' in regressors: regressor_list.append((xgb_regressor, xgb_fit_params))
 		if 'c' in regressors: regressor_list.append((cb_clf, {}))
+		if 'l' in regressors: regressor_list.append((lr_regressor, {}))
 		assert (len(regressor_list) > 0) and (len(regressor_list) == len(regressors))
 
 		for regressor, fit_params in regressor_list:
-			if IDX_test is not None and not isinstance(regressor, SVR):
+			if IDX_test is not None and not isinstance(regressor, LinearRegression):
 				fit_params['eval_set']=[(X_test, Y_test)]
 			if a.weighted:
 				fit_params['sample_weight'] = train_weights
@@ -568,10 +572,10 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 			regressor.fit(X_train, Y_train, **fit_params)
 			if isinstance(regressor, xgb.XGBRegressor):
 				score = regressor.best_score
-			elif isinstance(regressor, SVR):
-				score =  np.sqrt(mean_squared_error(regressor.predict(X_test), Y_test))
-			else:
+			elif isinstance(regressor, CatBoostRegressor):
 				score =  np.sqrt(mean_squared_error(regressor.get_test_eval(), Y_test))
+			else:
+				score =  np.sqrt(mean_squared_error(regressor.predict(X_test), Y_test))
 
 			print(f" Score {score} @ k-fold {fold_id+1}/{folds} @ bootstrap {bootstrap_run+1}/{bootstrap_runs}")
 			regressor_scores.append(score)
@@ -580,7 +584,9 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 				X_y = np.zeros((Y.shape[0], 0))
 			if a.oof:
 				for Y_oof in Y_oofs:
-					X_y = np.hstack([X_y, Y_oof])
+					print(X_y.shape)
+					print(Y_oof[fold_id].shape)
+					X_y = np.hstack([X_y, np.expand_dims(Y_oof[fold_id], axis=-1)])
 			T = regressor.predict(X_y)
 			regressor_predictions.append(np.expm1(T))
 			oof_regressor_predictions.append(np.expm1(regressor.predict(X_test)))
