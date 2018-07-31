@@ -19,7 +19,6 @@ df = df.loc[giba_rows]
 
 DRAW = True
 
-
 class SelectArea(object):
     def __init__(self):
         self.ax = plt.gca()
@@ -29,6 +28,7 @@ class SelectArea(object):
         self.y0 = None
         self.x1 = None
         self.y1 = None
+        self.groupno = 20
         self.ax.add_patch(self.rect)
         self.ax.figure.canvas.mpl_connect('button_press_event', self.on_press)
         self.ax.figure.canvas.mpl_connect('button_release_event',
@@ -50,7 +50,7 @@ class SelectArea(object):
                            (Y[:, 1] > self.y1) & (Y[:, 1] < self.y0))
         cols = INV_COLMAP_ARRAY[area.flatten()]
         print(cols)
-        if DRAW:
+        if DRAW and len(cols) == 40:
 
             def find_nearest_column(col0, seen):
                 x = df[[col0]].values.flatten()
@@ -94,7 +94,7 @@ class SelectArea(object):
                 #    list(cols), key=lambda x: distance(x, cols[i]))
                 cols_sorted = [cols[i]]
                 col0 = cols[i]
-                for j in range(len(cols) - 1):
+                for j in range(len(cols)-1):
                     col0 = find_nearest_column(col0, cols_sorted)
                     cols_sorted.append(col0)
                 cols_sorted = np.array(cols_sorted)
@@ -107,6 +107,9 @@ class SelectArea(object):
                     min_loss = loss
             cols = best_sort
             print(cols)
+            if len(cols) == 40:
+                np.save('groups/%d.npy' % self.groupno, cols)
+            self.groupno += 1
             img = np.log1p(df[cols].values) * 11
             img = np.array(np.stack((img, ) * 3, -1), dtype=np.uint8).copy()
             img = cv2.resize(
