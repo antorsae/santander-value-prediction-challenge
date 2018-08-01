@@ -16,10 +16,12 @@ import multiprocessing
 from tqdm import tqdm
 
 import xgboost as xgb
+import lightgbm
 from sklearn.utils import resample
 from sklearn.svm import SVR
 from sklearn.linear_model import LinearRegression
 from sklearn.feature_selection import SelectKBest
+from sklearn.ensemble import RandomForestRegressor
 from copy import copy
 import argparse
 import itertools
@@ -27,11 +29,13 @@ import itertools
 from leak import get_column_groups
 
 allowed_decompositions = set(list('plstigra'))
-allowed_regressors     = set(list('cxl'))
+allowed_regressors     = set(list('cxlr'))
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-d', nargs='*',                type=str, help='Decompositions to use, any of {" ".join(allowed_decompositions)}')
 parser.add_argument('-r', nargs='+', default=['x'], type=str, help='Regressors to use, any of {" ".join(allowed_decompositions)}')
+
+parser.add_argument('-i',  '--iters',           default=3000,    type=int, help='Max iterations/estimators/etc. for regressors')
 
 parser.add_argument('-o',   '--oof', nargs='+',                type=str, help='OOF predictions for L2 model')
 
@@ -408,7 +412,7 @@ from sklearn.model_selection import KFold
 
 xgb_params = {
     #'tree_method' : 'gpu_hist',
-    'n_estimators': 1000,
+    'n_estimators':  a.iters,
     'objective': 'reg:linear',
     'booster': 'gbtree',
     'learning_rate': 0.02,
@@ -420,13 +424,13 @@ xgb_params = {
     'subsample': 0.8,
     'colsample_bytree': 0.055*2,
     'colsample_bylevel': 0.50*2,
-    'n_jobs': multiprocessing.cpu_count(),
+    'n_jobs': multiprocessing.cpu_count() // 2,
     'random_state': 456,
     }
 xgb_fit_params = {
     'early_stopping_rounds': 200,
     'eval_metric': 'rmse',
-    'verbose': True,
+    'verbose': False,
 }
 
 if a.select_k_best is not None:
@@ -512,39 +516,32 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 
 		if X_oofs:
 			for X_oof in X_oofs:
-				print(X_train.shape, X_test.shape)
 				X_train_oof = X_test_oof = None
-
 				for oof_fold_id, X_oof_fold in enumerate(X_oof):
 					X_oof_fold = np.expand_dims(X_oof_fold, axis=-1)
-					print(X_oof_fold.shape)
 					if oof_fold_id != fold_id:
 						X_train_oof = np.vstack([X_train_oof, X_oof_fold]) if X_train_oof is not None else X_oof_fold
-						print(X_train_oof.shape)
 					else:
 						X_test_oof  = np.vstack([ X_test_oof, X_oof_fold]) if X_test_oof  is not None else X_oof_fold
-
-				#print(X_train_oof.shape, X_test_oof.shape)
-
-				print(X_train.shape, X_test.shape)
-				print(X_train_oof.shape, X_test_oof.shape)
 
 				X_train = np.hstack([X_train, X_train_oof])
 				X_test  = np.hstack([X_test,  X_test_oof])
 
 		print(X_train.shape)
 
-
-		cb_clf = CatBoostRegressor(iterations=30000,
-									learning_rate=0.005,
+		cb_clf = CatBoostRegressor(iterations= a.iters,
+									learning_rate=0.02,
 									depth=6,
 									eval_metric='RMSE',
 									random_seed = fold_id,
 									bagging_temperature = 0.5,
 									od_type='Iter',
 									metric_period = 200,
-									od_wait=200,
+									#od_wait=200,
+									early_stopping_rounds = 200,
+									use_best_model = True,
 									l2_leaf_reg = None,
+									task_type = 'GPU'
 									)
 
 		xgb_regressor = xgb.XGBRegressor(**xgb_params)
@@ -552,6 +549,18 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 		svm_regressor = SVR(kernel='rbf', cache_size=20e3)
 
 		lr_regressor = LinearRegression(n_jobs=-1)
+		rf_regressor = RandomForestRegressor(n_estimators = a.iters, n_jobs=-1)
+		lgb_regressor = lightgbm.LGBMRegressor(
+	    	n_estimators = a.iters,
+        	boosting_type = 'gbdt',
+        	learning_rate = 0.007,
+        	num_leaves = 512,
+        	max_depth = 32,
+        	n_jobs=  multiprocessing.cpu_count() // 2,
+			min_data_in_leaf = 500,
+        	random_state= random_state,
+			verbose=-1,
+		)
 
 		regressor_scores = []
 		regressor_predictions = []
@@ -559,23 +568,27 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 
 		regressor_list = []
 		if 'x' in regressors: regressor_list.append((xgb_regressor, xgb_fit_params))
-		if 'c' in regressors: regressor_list.append((cb_clf, {}))
-		if 'l' in regressors: regressor_list.append((lr_regressor, {}))
+		if 'c' in regressors: regressor_list.append((cb_clf, {'early_stopping_rounds' : 200}))
+		if 'l' in regressors: regressor_list.append((lgb_regressor, {'early_stopping_rounds' : 200, 'eval_metric' : 'l2_root', 'verbose' : -1}))
+		if 'r' in regressors: regressor_list.append((rf_regressor, {}))
 		assert (len(regressor_list) > 0) and (len(regressor_list) == len(regressors))
 
 		for regressor, fit_params in regressor_list:
-			if IDX_test is not None and not isinstance(regressor, LinearRegression):
+			if IDX_test is not None and (
+				isinstance(regressor, CatBoostRegressor) or 
+				isinstance(regressor, xgb.XGBRegressor) or 
+				isinstance(regressor, lightgbm.LGBMRegressor) ):
 				fit_params['eval_set']=[(X_test, Y_test)]
 			if a.weighted:
 				fit_params['sample_weight'] = train_weights
 
 			regressor.fit(X_train, Y_train, **fit_params)
+
+			predict_params = {}
 			if isinstance(regressor, xgb.XGBRegressor):
-				score = regressor.best_score
-			elif isinstance(regressor, CatBoostRegressor):
-				score =  np.sqrt(mean_squared_error(regressor.get_test_eval(), Y_test))
-			else:
-				score =  np.sqrt(mean_squared_error(regressor.predict(X_test), Y_test))
+				predict_params['ntree_limit'] = regressor.best_iteration
+
+			score =  np.sqrt(mean_squared_error(regressor.predict(X_test, **predict_params), Y_test))
 
 			print(f" Score {score} @ k-fold {fold_id+1}/{folds} @ bootstrap {bootstrap_run+1}/{bootstrap_runs}")
 			regressor_scores.append(score)
@@ -584,10 +597,9 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 				X_y = np.zeros((Y.shape[0], 0))
 			if a.oof:
 				for Y_oof in Y_oofs:
-					print(X_y.shape)
-					print(Y_oof[fold_id].shape)
 					X_y = np.hstack([X_y, np.expand_dims(Y_oof[fold_id], axis=-1)])
 			T = regressor.predict(X_y)
+			print(T)
 			regressor_predictions.append(np.expm1(T))
 			oof_regressor_predictions.append(np.expm1(regressor.predict(X_test)))
 
