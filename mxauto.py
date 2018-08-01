@@ -25,8 +25,11 @@ from sklearn.ensemble import RandomForestRegressor
 from copy import copy
 import argparse
 import itertools
+import sys
 
 from leak import get_column_groups
+
+print(' '.join(sys.argv))
 
 allowed_decompositions = set(list('plstigra'))
 allowed_regressors     = set(list('cxlr'))
@@ -35,7 +38,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument('-d', nargs='*',                type=str, help='Decompositions to use, any of {" ".join(allowed_decompositions)}')
 parser.add_argument('-r', nargs='+', default=['x'], type=str, help='Regressors to use, any of {" ".join(allowed_decompositions)}')
 
-parser.add_argument('-i',  '--iters',           default=3000,    type=int, help='Max iterations/estimators/etc. for regressors')
+parser.add_argument('-i',  '--iters',               default=3000,        type=int,   help='Max iterations/estimators/etc. for regressors')
+parser.add_argument('-lr', '--learning-rate',       default=None,        type=float, help='Learning rate')
+parser.add_argument(       '--catboost-device',     default='GPU',       type=str,   help='GPU or CPU')
+parser.add_argument('-des', '--disable-early-stop', action='store_true', )
+parser.add_argument('-v',   '--verbose',            action='store_true', )
 
 parser.add_argument('-o',   '--oof', nargs='+',                type=str, help='OOF predictions for L2 model')
 
@@ -93,6 +100,7 @@ if decompositions != []:
 regressors     = sorted(set(itertools.chain.from_iterable([list(s) for s in a.r])))
 # c CatBoostRegressor
 # x XGBRegressor
+# l LightgbmRegressor
 assert allowed_regressors.issuperset(set(regressors))
 
 print(f"Using {decompositions} compositions and {regressors} regressors")
@@ -388,7 +396,6 @@ if a.weighted:
 	train_distances = np.linalg.norm(pca[:Y.shape[0]]- test_mean, axis=1)
 	train_weights = MinMaxScaler(feature_range=(1, 100), copy=True).fit_transform(np.expand_dims(1. / np.log1p(train_distances), axis=1))
 
-#Xnn = X.values.copy()
 if a.meta_depth != 0:
 	meta_X = None
 	def op_mul(a,b): return 1 if b ==0 else a*b
@@ -402,8 +409,6 @@ if a.meta_depth != 0:
 print(X_all.values.shape)
 
 X_all = X_all.T.drop_duplicates().T
-#ut = UniqueTransformer().fit(X_all.values)
-#X_all = ut.transform(X_all.values)
 
 print(X_all.shape)
 
@@ -415,7 +420,7 @@ xgb_params = {
     'n_estimators':  a.iters,
     'objective': 'reg:linear',
     'booster': 'gbtree',
-    'learning_rate': 0.02,
+    'learning_rate': a.learning_rate or 0.02,
     'max_depth': 32,
     'min_child_weight': 57,
     'gamma' : 1.5,
@@ -428,10 +433,22 @@ xgb_params = {
     'random_state': 456,
     }
 xgb_fit_params = {
-    'early_stopping_rounds': 200,
     'eval_metric': 'rmse',
-    'verbose': False,
+    'verbose': a.verbose,
 }
+
+cb_fit_params = {
+	'verbose': a.verbose,
+}
+lgb_fit_params = {
+	'eval_metric' : 'l2_root', 
+	'verbose' : -1 if not a.verbose else 1
+}
+
+if not a.disable_early_stop:
+	xgb_fit_params['early_stopping_rounds'] = 200
+	cb_fit_params['early_stopping_rounds'] = 200
+	lgb_fit_params['early_stopping_rounds'] = 200
 
 if a.select_k_best is not None:
 	print(f"Selecting {a.select_k_best} best features")
@@ -473,6 +490,7 @@ if a.oof:
 for X_oof in X_oofs:
 	assert len(X_oof) == folds
 
+regressor_best_iterations = []
 for fold_id, (_IDX_train, IDX_test) in enumerate(
 	KFold(n_splits=folds, random_state=random_state, shuffle=False).split(Y_all_to_train) if folds > 1 else [(range(len(Y_all_to_train)), None)] ):
 
@@ -530,18 +548,17 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 		print(X_train.shape)
 
 		cb_clf = CatBoostRegressor(iterations= a.iters,
-									learning_rate=0.02,
+									learning_rate=a.learning_rate or 0.02,
 									depth=6,
 									eval_metric='RMSE',
 									random_seed = fold_id,
 									bagging_temperature = 0.5,
-									od_type='Iter',
-									metric_period = 200,
+									#od_type='Iter' if not a.disable_early_stop else None,
+									metric_period = 10,
 									#od_wait=200,
-									early_stopping_rounds = 200,
 									use_best_model = True,
 									l2_leaf_reg = None,
-									task_type = 'GPU'
+									task_type = a.catboost_device
 									)
 
 		xgb_regressor = xgb.XGBRegressor(**xgb_params)
@@ -553,13 +570,13 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 		lgb_regressor = lightgbm.LGBMRegressor(
 	    	n_estimators = a.iters,
         	boosting_type = 'gbdt',
-        	learning_rate = 0.007,
+        	learning_rate = a.learning_rate or 0.007,
         	num_leaves = 512,
         	max_depth = 32,
         	n_jobs=  multiprocessing.cpu_count() // 2,
 			min_data_in_leaf = 500,
         	random_state= random_state,
-			verbose=-1,
+			verbose=-1 if not a.verbose else 1,
 		)
 
 		regressor_scores = []
@@ -568,8 +585,8 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 
 		regressor_list = []
 		if 'x' in regressors: regressor_list.append((xgb_regressor, xgb_fit_params))
-		if 'c' in regressors: regressor_list.append((cb_clf, {'early_stopping_rounds' : 200}))
-		if 'l' in regressors: regressor_list.append((lgb_regressor, {'early_stopping_rounds' : 200, 'eval_metric' : 'l2_root', 'verbose' : -1}))
+		if 'c' in regressors: regressor_list.append((cb_clf, cb_fit_params))
+		if 'l' in regressors: regressor_list.append((lgb_regressor, lgb_fit_params))
 		if 'r' in regressors: regressor_list.append((rf_regressor, {}))
 		assert (len(regressor_list) > 0) and (len(regressor_list) == len(regressors))
 
@@ -585,9 +602,16 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 			regressor.fit(X_train, Y_train, **fit_params)
 
 			predict_params = {}
-			if isinstance(regressor, xgb.XGBRegressor):
+			if isinstance(regressor, xgb.XGBRegressor) and not a.disable_early_stop:
 				predict_params['ntree_limit'] = regressor.best_iteration
+				regressor_best_iterations.append(regressor.best_iteration)
 
+			if isinstance(regressor, lightgbm.LGBMRegressor) and not a.disable_early_stop:
+				regressor_best_iterations.append(regressor.best_iteration_)
+
+			if isinstance(regressor, CatBoostRegressor) and not a.disable_early_stop:
+				regressor_best_iterations.append(regressor.tree_count_)
+ 
 			score =  np.sqrt(mean_squared_error(regressor.predict(X_test, **predict_params), Y_test))
 
 			print(f" Score {score} @ k-fold {fold_id+1}/{folds} @ bootstrap {bootstrap_run+1}/{bootstrap_runs}")
@@ -614,12 +638,17 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 del X_all
 
 average_rmse = np.mean(fold_scores)
-print(f'Average RMSE: {average_rmse}')
+print(f'Average RMSE: {average_rmse} +- {np.var(fold_scores)}')
+if not a.disable_early_stop:
+	print(f'Best iterations {regressor_best_iterations}, mean {int(np.mean(regressor_best_iterations))}')
 
 submissions = np.mean(fold_predictions, axis=0)
 submissions[pseudo_Y != 0] = np.expm1(pseudo_Y[pseudo_Y != 0])
 result = pd.DataFrame({'ID':ID,'target':submissions})
-basename = f"{'_du' if a.dummify_ugly else ''}{'_w' if a.weighted else ''}_{X_all_type}_n{a.num_decompose}_d{''.join(decompositions)}_m{a.meta_base}{'mul' if a.meta_mul else 'pow'}{a.meta_depth}_s{a.select_k_best}_r{''.join(regressors)}_f{folds}_b{bootstrap_runs}_RMSE{average_rmse}"
+basename = f"{'_du' if a.dummify_ugly else ''}{'_w' if a.weighted else ''}_{X_all_type}_n{a.num_decompose}" \
+	f"_d{''.join(decompositions)}_m{a.meta_base}{'mul' if a.meta_mul else 'pow'}{a.meta_depth}_s{a.select_k_best}" \
+	f"_r{''.join(regressors)}_f{folds}_b{bootstrap_runs}{f'_i{a.iters}' if a.disable_early_stop else ''}" \
+	f"_RMSE{average_rmse}"
 result.to_csv(f"csv/sub{basename}.csv", index=False)
 if not a.oof:
 	pickle.dump( (oof_fold_predictions, fold_predictions), open( f"oof/{basename}.pkl", "wb" ) )
