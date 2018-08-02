@@ -60,7 +60,8 @@ parser.add_argument('-cg', '--column-groups',  action='store_true',    help='Onl
 parser.add_argument('-ds', '--drop-selected',  action='store_true',    help='Drop selected colums')
 parser.add_argument('-w',  '--weighted',       action='store_true',    help='Weight training samples based on similarity vs test distribution')
 parser.add_argument('-bh', '--bins',           default=0,    type=int, help='Bins for histogram')
-parser.add_argument(       '--pseudo',         default='baseline_submission_with_leaks_all_1000.csv',    help='Pseudo-labeling')
+parser.add_argument(       '--leak',           default='baseline_submission_with_leaks_all_1000.csv',    help='Leak file')
+parser.add_argument('-p',  '--pseudo',         action='store_true',    help='Pseudo label training (using leak)')
 parser.add_argument('-du', '--dummify-ugly',    action='store_true',     help='Dummify fake/ugly test rows')
 
 parser.add_argument(       '--debug',          action='store_true',    help='Wait for remote debugger to attach')
@@ -155,7 +156,7 @@ else:
 	(Y, ID, drop_cols) = pickle.load(open(MX_PKL, "rb" ) )	
 
 
-pseudo_Y =  np.log1p(pd.read_csv(a.pseudo)['target'].values) if a.pseudo else None
+leak_Y =  np.log1p(pd.read_csv(a.leak)['target'].values) if a.leak else None
 
 def get_manifold(X):
 	from mxnet import nd, Context
@@ -472,11 +473,15 @@ fold_scores = []
 fold_predictions = []
 oof_fold_predictions = []
 
-print(np.arange(len(Y)).shape, np.where(pseudo_Y !=0)[0].shape)
-to_train_idx = np.hstack([np.arange(len(Y)), len(Y) + np.where(pseudo_Y !=0)[0]])
+n_leak = np.where(leak_Y !=0)[0].shape[0]
+print(np.arange(len(Y)).shape, n_leak)
+to_train_idx = np.arange(len(Y))
+Y_all_to_train = Y
+if a.pseudo:
+	to_train_idx = np.hstack([to_train_idx, len(Y) + np.where(leak_Y !=0)[0]])
+	Y_all_to_train = np.hstack([Y_all_to_train, leak_Y[leak_Y!=0]])
 
 X_all_to_train = X_all.iloc[to_train_idx]
-Y_all_to_train = np.hstack([Y, pseudo_Y[pseudo_Y!=0]])
 
 X_oofs = []
 Y_oofs = []
@@ -643,11 +648,12 @@ if not a.disable_early_stop:
 	print(f'Best iterations {regressor_best_iterations}, mean {int(np.mean(regressor_best_iterations))}')
 
 submissions = np.mean(fold_predictions, axis=0)
-submissions[pseudo_Y != 0] = np.expm1(pseudo_Y[pseudo_Y != 0])
+submissions[leak_Y != 0] = np.expm1(leak_Y[leak_Y != 0])
 result = pd.DataFrame({'ID':ID,'target':submissions})
 basename = f"{'_du' if a.dummify_ugly else ''}{'_w' if a.weighted else ''}_{X_all_type}_n{a.num_decompose}" \
 	f"_d{''.join(decompositions)}_m{a.meta_base}{'mul' if a.meta_mul else 'pow'}{a.meta_depth}_s{a.select_k_best}" \
 	f"_r{''.join(regressors)}_f{folds}_b{bootstrap_runs}{f'_i{a.iters}' if a.disable_early_stop else ''}" \
+	f"_l{n_leak}_{'p' if a.pseudo else 'np'}" \
 	f"_RMSE{average_rmse}"
 result.to_csv(f"csv/sub{basename}.csv", index=False)
 if not a.oof:
