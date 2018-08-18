@@ -23,6 +23,9 @@ from sklearn.metrics import mean_squared_error, make_scorer
 from scipy.stats import mode, skew, kurtosis, entropy
 from sklearn.ensemble import ExtraTreesRegressor
 
+import matplotlib 
+matplotlib.use("Agg") 
+
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -411,12 +414,14 @@ _column_groups = [[
 ] ]
 
 def get_column_groups(include_giba=True):
-    if False:
+    if True:
         # Giba's group is already included in the pk file
-        column_groups = pickle.load(open('groups40.pk', 'rb'))
-        column_groups = [x for i,x in enumerate(column_groups) if i not in [8, 9, 14, 37, 42, 45]]
-        if not include_giba:
-            column_groups.pop(0)
+        #column_groups = pickle.load(open('groups40.pk', 'rb'))
+        column_groups = [giba_columns] if include_giba else []
+        column_groups.extend(np.load('column_groups_71x40.npy').tolist())
+        #column_groups = [x for i,x in enumerate(column_groups) if i not in [8, 9, 14, 37, 42, 45]]
+#        if not include_giba:
+#            column_groups.pop(0)
     else:
         n_verified_groups = 23 + 9
         column_groups = [giba_columns] if include_giba else []
