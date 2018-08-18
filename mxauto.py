@@ -61,7 +61,7 @@ parser.add_argument('-cg', '--column-groups',  action='store_true',    help='Onl
 parser.add_argument('-ds', '--drop-selected',  action='store_true',    help='Drop selected colums')
 parser.add_argument('-w',  '--weighted',       action='store_true',    help='Weight training samples based on similarity vs test distribution')
 parser.add_argument('-bh', '--bins',           default=0,    type=int, help='Bins for histogram')
-parser.add_argument(       '--leak',           default='baseline_submission_with_leaks_all_1000.csv',    help='Leak file')
+parser.add_argument(       '--leak',           default='baseline_3865_7853_0.9981888745148771.csv',    help='Leak file')
 parser.add_argument('-p',  '--pseudo',         action='store_true',    help='Pseudo label training (using leak)')
 parser.add_argument('-du', '--dummify-ugly',    action='store_true',     help='Dummify fake/ugly test rows')
 
