@@ -45,6 +45,7 @@ parser.add_argument('-des', '--disable-early-stop', action='store_true', )
 parser.add_argument('-v',   '--verbose',            action='store_true', )
 
 parser.add_argument('-o',   '--oof', nargs='+',                type=str, help='OOF predictions for L2 model')
+parser.add_argument('-od',  '--oof-dir',       default=None, type=str, help='Path to save OOF predictions')
 
 parser.add_argument('-n',  '--num-decompose',  default=20,   type=int, help='Components for dimensionality redux')
 parser.add_argument('-md', '--meta-depth',     default=0,    type=int, help='Depth for calculating meta-features splits(0 to disable), e.g. -md 6')
@@ -489,6 +490,8 @@ if a.oof:
 	for oof_filename in a.oof:
 		print(oof_filename)
 		X_oof, Y_oof = pickle.load(open(oof_filename, 'rb'))
+		X_oof = [np.log1p(__o) for __o in X_oof ]
+		Y_oof = [np.log1p(__o) for __o in Y_oof ]
 		X_oofs.append(X_oof)
 		Y_oofs.append(Y_oof)
 
@@ -605,6 +608,7 @@ for fold_id, (_IDX_train, IDX_test) in enumerate(
 				fit_params['sample_weight'] = train_weights
 
 			regressor.fit(X_train, Y_train, **fit_params)
+			#print(regressor.get_feature_importance())
 
 			predict_params = {}
 			if isinstance(regressor, xgb.XGBRegressor) and not a.disable_early_stop:
@@ -656,7 +660,9 @@ basename = f"{'_du' if a.dummify_ugly else ''}{'_w' if a.weighted else ''}_{X_al
 	f"_l{n_leak}_{'p' if a.pseudo else 'np'}" \
 	f"_RMSE{average_rmse}"
 result.to_csv(f"csv/sub{basename}.csv", index=False)
-if not a.oof:
-	pickle.dump( (oof_fold_predictions, fold_predictions), open( f"oof/{basename}.pkl", "wb" ) )
+if a.oof_dir or not a.oof:
+	oof_dir = a.oof_dir or 'oof'
+	os.makedirs(oof_dir, exist_ok=True)
+	pickle.dump( (oof_fold_predictions, fold_predictions), open( f"{oof_dir}/{basename}.pkl", "wb" ) )
 
 print('end')
